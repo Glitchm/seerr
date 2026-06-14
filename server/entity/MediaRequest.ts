@@ -1,4 +1,5 @@
 import TheMovieDb from '@server/api/themoviedb';
+import type { TmdbMovieDetails, TmdbTvDetails } from '@server/api/themoviedb/interfaces';
 import {
   MediaRequestStatus,
   MediaStatus,
@@ -9,6 +10,12 @@ import type { MediaRequestBody } from '@server/interfaces/api/requestInterfaces'
 import notificationManager, { Notification } from '@server/lib/notifications';
 import overrideRules from '@server/lib/overrideRules';
 import { Permission } from '@server/lib/permissions';
+import {
+  extractMovieCertification,
+  extractTvCertification,
+  isMovieCertificationAllowed,
+  isTvCertificationAllowed,
+} from '@server/lib/ratings';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { DbAwareColumn, resolveDbType } from '@server/utils/DbColumnHelper';
@@ -37,6 +44,7 @@ import { User } from './User';
 
 export class RequestPermissionError extends Error {}
 export class QuotaRestrictedError extends Error {}
+export class RatingRestrictedError extends Error {}
 export class DuplicateMediaRequestError extends Error {}
 export class NoSeasonsAvailableError extends Error {}
 export class BlocklistedMediaError extends Error {}
@@ -170,6 +178,29 @@ export class MediaRequest {
       requestBody.mediaType === MediaType.MOVIE
         ? await tmdb.getMovie({ movieId: requestBody.mediaId })
         : await tmdb.getTvShow({ tvId: requestBody.mediaId });
+
+    // Enforce per-user maturity rating caps. The server is the wall: even if the
+    // UI hides the request button, a capped user cannot request over-cap titles
+    // by hitting the API directly.
+    if (requestBody.mediaType === MediaType.MOVIE) {
+      const certification = extractMovieCertification(
+        (tmdbMedia as TmdbMovieDetails).release_dates
+      );
+      if (!isMovieCertificationAllowed(certification, requestUser)) {
+        throw new RatingRestrictedError(
+          'This title exceeds your maximum allowed movie rating.'
+        );
+      }
+    } else {
+      const certification = extractTvCertification(
+        (tmdbMedia as TmdbTvDetails).content_ratings
+      );
+      if (!isTvCertificationAllowed(certification, requestUser)) {
+        throw new RatingRestrictedError(
+          'This title exceeds your maximum allowed series rating.'
+        );
+      }
+    }
 
     let media = await mediaRepository.findOne({
       where: {
