@@ -25,8 +25,8 @@ import type {
   TmdbSearchTvResponse,
   TmdbSeasonWithEpisodes,
   TmdbTvDetails,
-  TmdbTvScanDetails,
   TmdbTvRatingResult,
+  TmdbTvScanDetails,
   TmdbUpcomingMoviesResponse,
   TmdbWatchProviderDetails,
   TmdbWatchProviderRegion,
@@ -173,6 +173,8 @@ const stripUnreadTvCredits = <T>(data: T): T => {
   delete show.credits?.cast;
 
   return data;
+};
+
 // Mirror of the US rating scales in server/lib/ratings.ts, kept local to avoid a
 // circular import. Used to clamp a caller's certification selection to a user's
 // maturity cap on discover queries.
@@ -550,6 +552,10 @@ class TheMovieDb extends ExternalAPI implements TvShowProvider {
       throw new Error(
         `[TMDB] Failed to fetch TV show scan details: ${e.message}`,
         { cause: e }
+      );
+    }
+  };
+
   // Lightweight, heavily-cached certification lookups used for per-user maturity
   // rating enforcement. Far cheaper than fetching full movie/tv details when we
   // only need the certification to filter discover/search results.

@@ -1,5 +1,8 @@
 import TheMovieDb from '@server/api/themoviedb';
-import type { TmdbMovieDetails, TmdbTvDetails } from '@server/api/themoviedb/interfaces';
+import type {
+  TmdbMovieDetails,
+  TmdbTvDetails,
+} from '@server/api/themoviedb/interfaces';
 import {
   MediaRequestStatus,
   MediaStatus,
