@@ -81,9 +81,6 @@ const TvRequestModal = ({
   const { addToast } = useToasts();
   // Episode-level (partial) rows are not editable as whole seasons: exclude
   // them so a save cannot silently drop or expand the picks.
-  const partialEditingSeasons: number[] = (editRequest?.seasons ?? [])
-    .filter((season) => season.selectedEpisodes?.length)
-    .map((season) => season.seasonNumber);
   const editingSeasons: number[] = (editRequest?.seasons ?? [])
     .filter((season) => !season.selectedEpisodes?.length)
     .map((season) => season.seasonNumber);
