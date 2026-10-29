@@ -17,9 +17,9 @@ import type SeasonRequest from '@server/entity/SeasonRequest';
 import type { NonFunctionProperties } from '@server/interfaces/api/common';
 import type { QuotaResponse } from '@server/interfaces/api/userInterfaces';
 import { Permission } from '@server/lib/permissions';
-import type { TvDetails } from '@server/models/Tv';
+import type { SeasonWithEpisodes, TvDetails } from '@server/models/Tv';
 import axios from 'axios';
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { useIntl } from 'react-intl';
 import useSWR, { mutate } from 'swr';
 
@@ -51,6 +51,12 @@ const messages = defineMessages('components.RequestModal', {
   requesterror: 'Something went wrong while submitting the request.',
   noSeasonsAvailable:
     'All of the selected seasons are already requested or available.',
+  selectEpisodes: 'Select Episodes',
+  hideEpisodes: 'Hide Episodes',
+  episodecountselected:
+    '{episodeCount} {episodeCount, plural, one {Episode} other {Episodes}} Selected',
+  partialNotEditable:
+    'Episode-level requests are edited by cancel; whole seasons on this request are unaffected.',
   pendingapproval: 'Your request is pending approval.',
 });
 
@@ -73,14 +79,28 @@ const TvRequestModal = ({
 }: RequestModalProps) => {
   const settings = useSettings();
   const { addToast } = useToasts();
-  const editingSeasons: number[] = (editRequest?.seasons ?? []).map(
-    (season) => season.seasonNumber
-  );
+  // Episode-level (partial) rows are not editable as whole seasons: exclude
+  // them so a save cannot silently drop or expand the picks.
+  const partialEditingSeasons: number[] = (editRequest?.seasons ?? [])
+    .filter((season) => season.selectedEpisodes?.length)
+    .map((season) => season.seasonNumber);
+  const editingSeasons: number[] = (editRequest?.seasons ?? [])
+    .filter((season) => !season.selectedEpisodes?.length)
+    .map((season) => season.seasonNumber);
   const { data, error } = useSWR<TvDetails>(`/api/v1/tv/${tmdbId}`);
   const [requestOverrides, setRequestOverrides] =
     useState<RequestOverrides | null>(null);
   const [selectedSeasons, setSelectedSeasons] = useState<number[]>(
     editRequest ? editingSeasons : []
+  );
+  const [episodeSelections, setEpisodeSelections] = useState<
+    Record<number, number[]>
+  >({});
+  const [expandedSeason, setExpandedSeason] = useState<number | null>(null);
+  const { data: selectedSeasonDetails } = useSWR<SeasonWithEpisodes>(
+    expandedSeason !== null
+      ? `/api/v1/tv/${tmdbId}/season/${expandedSeason}`
+      : null
   );
   const intl = useIntl();
   const { user, hasPermission } = useUser();
@@ -99,8 +119,10 @@ const TvRequestModal = ({
 
   const currentlyRemaining =
     (quota?.tv.remaining ?? 0) -
-    selectedSeasons.length +
-    (editRequest?.seasons ?? []).length;
+    selectedSeasons.length -
+    Object.keys(episodeSelections).length +
+    (editRequest?.seasons ?? []).filter((s) => !s.selectedEpisodes?.length)
+      .length;
 
   const updateRequest = async (alsoApproveRequest = false) => {
     if (!editRequest) {
@@ -137,8 +159,18 @@ const TvRequestModal = ({
         if (alsoApproveRequest) {
           await axios.post(`/api/v1/request/${editRequest.id}/approve`);
         }
-      } else {
+      } else if (editingSeasons.length > 0) {
         await axios.delete(`/api/v1/request/${editRequest.id}`);
+      } else {
+        // Partial-only request: nothing editable here (cancel instead).
+        addToast(intl.formatMessage(messages.partialNotEditable), {
+          appearance: 'info',
+          autoDismiss: true,
+        });
+        if (onUpdating) {
+          onUpdating(false);
+        }
+        return;
       }
       mutate('/api/v1/request?filter=all&take=10&sort=modified&skip=0');
       mutate('/api/v1/request/count');
@@ -181,9 +213,17 @@ const TvRequestModal = ({
   };
 
   const sendRequest = async () => {
+    const partialSelections = Object.entries(episodeSelections)
+      .map(([seasonNumber, episodes]) => ({
+        seasonNumber: Number(seasonNumber),
+        episodeNumbers: [...episodes],
+      }))
+      .sort((a, b) => a.seasonNumber - b.seasonNumber);
+
     if (
       settings.currentSettings.partialRequestsEnabled &&
-      selectedSeasons.length === 0
+      selectedSeasons.length === 0 &&
+      partialSelections.length === 0
     ) {
       return;
     }
@@ -213,11 +253,19 @@ const TvRequestModal = ({
           mediaType: 'tv',
           is4k,
           ignoreQuota: requestOverrides?.ignoreQuota,
-          seasons: settings.currentSettings.partialRequestsEnabled
-            ? selectedSeasons.sort((a, b) => a - b)
-            : getAllSeasons().filter(
-                (season) => !getAllRequestedSeasons().includes(season)
-              ),
+          seasons:
+            partialSelections.length > 0
+              ? selectedSeasons.filter(
+                  (sn) => !partialSelections.some((p) => p.seasonNumber === sn)
+                )
+              : settings.currentSettings.partialRequestsEnabled
+                ? selectedSeasons.sort((a, b) => a - b)
+                : getAllSeasons().filter(
+                    (season) => !getAllRequestedSeasons().includes(season)
+                  ),
+          ...(partialSelections.length > 0
+            ? { episodes: partialSelections }
+            : {}),
           ...overrideParams,
         }
       );
@@ -320,7 +368,41 @@ const TvRequestModal = ({
       );
     } else {
       setSelectedSeasons((seasons) => [...seasons, seasonNumber]);
+      // A whole-season selection supersedes any episode-level picks
+      setEpisodeSelections((selections) => {
+        if (!(seasonNumber in selections)) {
+          return selections;
+        }
+        const next = { ...selections };
+        delete next[seasonNumber];
+        return next;
+      });
     }
+    if (expandedSeason === seasonNumber) {
+      setExpandedSeason(null);
+    }
+  };
+
+  const toggleEpisode = (seasonNumber: number, episodeNumber: number): void => {
+    // An episode pick supersedes a whole-season selection
+    setSelectedSeasons((seasons) =>
+      seasons.filter((sn) => sn !== seasonNumber)
+    );
+    setEpisodeSelections((selections) => {
+      const current = new Set(selections[seasonNumber] ?? []);
+      if (current.has(episodeNumber)) {
+        current.delete(episodeNumber);
+      } else {
+        current.add(episodeNumber);
+      }
+      const next = { ...selections };
+      if (current.size > 0) {
+        next[seasonNumber] = [...current].sort((a, b) => a - b);
+      } else {
+        delete next[seasonNumber];
+      }
+      return next;
+    });
   };
 
   const unrequestedSeasons = getAllSeasons().filter(
@@ -345,6 +427,9 @@ const TvRequestModal = ({
     } else {
       setSelectedSeasons([]);
     }
+    // Bulk season selection supersedes episode-level picks
+    setEpisodeSelections({});
+    setExpandedSeason(null);
   };
 
   const isAllSeasons = (): boolean => {
@@ -612,120 +697,214 @@ const TvRequestModal = ({
                           sn[is4k ? 'status4k' : 'status'] !==
                             MediaStatus.DELETED
                       );
+                      const hasPartialSelection =
+                        (episodeSelections[season.seasonNumber]?.length ?? 0) >
+                        0;
                       return (
-                        <tr key={`season-${season.id}`}>
-                          <td
-                            className={`whitespace-nowrap px-4 py-4 text-sm font-medium leading-5 text-gray-100 ${
-                              !settings.currentSettings
-                                .partialRequestsEnabled && 'hidden'
-                            }`}
-                          >
-                            <span
-                              role="checkbox"
-                              tabIndex={0}
-                              aria-checked={
-                                !!mediaSeason ||
-                                (!!seasonRequest &&
-                                  !editingSeasons.includes(
-                                    season.seasonNumber
-                                  )) ||
-                                isSelectedSeason(season.seasonNumber)
-                              }
-                              onClick={() => toggleSeason(season.seasonNumber)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' || e.key === 'Space') {
-                                  toggleSeason(season.seasonNumber);
-                                }
-                              }}
-                              className={`relative inline-flex h-5 w-10 flex-shrink-0 cursor-pointer items-center justify-center pt-2 focus:outline-none ${
-                                mediaSeason ||
-                                (quota?.tv.limit &&
-                                  currentlyRemaining <= 0 &&
-                                  !isSelectedSeason(season.seasonNumber)) ||
-                                (!!seasonRequest &&
-                                  !editingSeasons.includes(season.seasonNumber))
-                                  ? 'opacity-50'
-                                  : ''
+                        <Fragment key={`season-${season.id}`}>
+                          <tr>
+                            <td
+                              className={`whitespace-nowrap px-4 py-4 text-sm font-medium leading-5 text-gray-100 ${
+                                !settings.currentSettings
+                                  .partialRequestsEnabled && 'hidden'
                               }`}
                             >
                               <span
-                                aria-hidden="true"
-                                className={`${
+                                role="checkbox"
+                                tabIndex={0}
+                                aria-checked={
                                   !!mediaSeason ||
                                   (!!seasonRequest &&
                                     !editingSeasons.includes(
                                       season.seasonNumber
                                     )) ||
                                   isSelectedSeason(season.seasonNumber)
-                                    ? 'bg-indigo-500'
-                                    : 'bg-gray-700'
-                                } absolute mx-auto h-4 w-9 rounded-full transition-colors duration-200 ease-in-out`}
-                              />
-                              <span
-                                aria-hidden="true"
-                                className={`${
-                                  !!mediaSeason ||
+                                }
+                                onClick={() =>
+                                  toggleSeason(season.seasonNumber)
+                                }
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' || e.key === 'Space') {
+                                    toggleSeason(season.seasonNumber);
+                                  }
+                                }}
+                                className={`relative inline-flex h-5 w-10 flex-shrink-0 cursor-pointer items-center justify-center pt-2 focus:outline-none ${
+                                  mediaSeason ||
+                                  (quota?.tv.limit &&
+                                    currentlyRemaining <= 0 &&
+                                    !isSelectedSeason(season.seasonNumber)) ||
                                   (!!seasonRequest &&
                                     !editingSeasons.includes(
                                       season.seasonNumber
-                                    )) ||
-                                  isSelectedSeason(season.seasonNumber)
-                                    ? 'translate-x-5'
-                                    : 'translate-x-0'
-                                } absolute left-0 inline-block h-5 w-5 rounded-full border border-gray-200 bg-white shadow transition-transform duration-200 ease-in-out group-focus:border-blue-300 group-focus:ring`}
-                              />
-                            </span>
-                          </td>
-                          <td className="whitespace-nowrap px-1 py-4 text-sm font-medium leading-5 text-gray-100 md:px-6">
-                            {season.seasonNumber === 0
-                              ? intl.formatMessage(globalMessages.specials)
-                              : intl.formatMessage(messages.seasonnumber, {
-                                  number: season.seasonNumber,
-                                })}
-                          </td>
-                          <td className="whitespace-nowrap px-5 py-4 text-sm leading-5 text-gray-200 md:px-6">
-                            {season.episodeCount}
-                          </td>
-                          <td className="whitespace-nowrap py-4 pr-2 text-sm leading-5 text-gray-200 md:px-6">
-                            {!seasonRequest && !mediaSeason && (
-                              <Badge>
-                                {intl.formatMessage(
-                                  globalMessages.notrequested
-                                )}
-                              </Badge>
-                            )}
-                            {!mediaSeason &&
-                              seasonRequest?.status ===
-                                MediaRequestStatus.PENDING && (
-                                <Badge badgeType="warning">
-                                  {intl.formatMessage(globalMessages.pending)}
+                                    ))
+                                    ? 'opacity-50'
+                                    : ''
+                                }`}
+                              >
+                                <span
+                                  aria-hidden="true"
+                                  className={`${
+                                    !!mediaSeason ||
+                                    (!!seasonRequest &&
+                                      !editingSeasons.includes(
+                                        season.seasonNumber
+                                      )) ||
+                                    isSelectedSeason(season.seasonNumber)
+                                      ? 'bg-indigo-500'
+                                      : 'bg-gray-700'
+                                  } absolute mx-auto h-4 w-9 rounded-full transition-colors duration-200 ease-in-out`}
+                                />
+                                <span
+                                  aria-hidden="true"
+                                  className={`${
+                                    !!mediaSeason ||
+                                    (!!seasonRequest &&
+                                      !editingSeasons.includes(
+                                        season.seasonNumber
+                                      )) ||
+                                    isSelectedSeason(season.seasonNumber)
+                                      ? 'translate-x-5'
+                                      : 'translate-x-0'
+                                  } absolute left-0 inline-block h-5 w-5 rounded-full border border-gray-200 bg-white shadow transition-transform duration-200 ease-in-out group-focus:border-blue-300 group-focus:ring`}
+                                />
+                              </span>
+                            </td>
+                            <td className="whitespace-nowrap px-1 py-4 text-sm font-medium leading-5 text-gray-100 md:px-6">
+                              {season.seasonNumber === 0
+                                ? intl.formatMessage(globalMessages.specials)
+                                : intl.formatMessage(messages.seasonnumber, {
+                                    number: season.seasonNumber,
+                                  })}
+                            </td>
+                            <td className="whitespace-nowrap px-5 py-4 text-sm leading-5 text-gray-200 md:px-6">
+                              {season.episodeCount}
+                              {(hasPartialSelection ||
+                                seasonRequest?.selectedEpisodes?.length) && (
+                                <Badge badgeType="primary">
+                                  {' '}
+                                  {intl.formatMessage(
+                                    messages.episodecountselected,
+                                    {
+                                      episodeCount:
+                                        episodeSelections[season.seasonNumber]
+                                          ?.length ??
+                                        seasonRequest?.selectedEpisodes?.length,
+                                    }
+                                  )}
                                 </Badge>
                               )}
-                            {((!mediaSeason &&
-                              seasonRequest?.status ===
-                                MediaRequestStatus.APPROVED) ||
-                              mediaSeason?.[is4k ? 'status4k' : 'status'] ===
-                                MediaStatus.PROCESSING) && (
-                              <Badge badgeType="primary">
-                                {intl.formatMessage(globalMessages.requested)}
-                              </Badge>
-                            )}
-                            {mediaSeason?.[is4k ? 'status4k' : 'status'] ===
-                              MediaStatus.PARTIALLY_AVAILABLE && (
-                              <Badge badgeType="success">
-                                {intl.formatMessage(
-                                  globalMessages.partiallyavailable
+                              {!editRequest &&
+                                settings.currentSettings
+                                  .partialRequestsEnabled &&
+                                !mediaSeason &&
+                                !(
+                                  seasonRequest &&
+                                  !editingSeasons.includes(season.seasonNumber)
+                                ) && (
+                                  <button
+                                    type="button"
+                                    aria-expanded={
+                                      expandedSeason === season.seasonNumber
+                                    }
+                                    onClick={() =>
+                                      setExpandedSeason((current) =>
+                                        current === season.seasonNumber
+                                          ? null
+                                          : season.seasonNumber
+                                      )
+                                    }
+                                    className="ml-2 text-sm font-medium text-indigo-400 hover:text-indigo-300"
+                                  >
+                                    {expandedSeason === season.seasonNumber
+                                      ? intl.formatMessage(
+                                          messages.hideEpisodes
+                                        )
+                                      : intl.formatMessage(
+                                          messages.selectEpisodes
+                                        )}
+                                  </button>
                                 )}
-                              </Badge>
-                            )}
-                            {mediaSeason?.[is4k ? 'status4k' : 'status'] ===
-                              MediaStatus.AVAILABLE && (
-                              <Badge badgeType="success">
-                                {intl.formatMessage(globalMessages.available)}
-                              </Badge>
-                            )}
-                          </td>
-                        </tr>
+                            </td>
+                            <td className="whitespace-nowrap py-4 pr-2 text-sm leading-5 text-gray-200 md:px-6">
+                              {!seasonRequest && !mediaSeason && (
+                                <Badge>
+                                  {intl.formatMessage(
+                                    globalMessages.notrequested
+                                  )}
+                                </Badge>
+                              )}
+                              {!mediaSeason &&
+                                seasonRequest?.status ===
+                                  MediaRequestStatus.PENDING && (
+                                  <Badge badgeType="warning">
+                                    {intl.formatMessage(globalMessages.pending)}
+                                  </Badge>
+                                )}
+                              {((!mediaSeason &&
+                                seasonRequest?.status ===
+                                  MediaRequestStatus.APPROVED) ||
+                                mediaSeason?.[is4k ? 'status4k' : 'status'] ===
+                                  MediaStatus.PROCESSING) && (
+                                <Badge badgeType="primary">
+                                  {intl.formatMessage(globalMessages.requested)}
+                                </Badge>
+                              )}
+                              {mediaSeason?.[is4k ? 'status4k' : 'status'] ===
+                                MediaStatus.PARTIALLY_AVAILABLE && (
+                                <Badge badgeType="success">
+                                  {intl.formatMessage(
+                                    globalMessages.partiallyavailable
+                                  )}
+                                </Badge>
+                              )}
+                              {mediaSeason?.[is4k ? 'status4k' : 'status'] ===
+                                MediaStatus.AVAILABLE && (
+                                <Badge badgeType="success">
+                                  {intl.formatMessage(globalMessages.available)}
+                                </Badge>
+                              )}
+                            </td>
+                          </tr>
+                          {expandedSeason === season.seasonNumber && (
+                            <tr>
+                              <td
+                                colSpan={4}
+                                className="bg-gray-800/40 px-4 py-4 md:px-6"
+                              >
+                                {selectedSeasonDetails?.episodes.map(
+                                  (episode) => (
+                                    <label
+                                      key={episode.episodeNumber}
+                                      className="flex items-center gap-2 py-0.5 text-sm text-gray-200"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={
+                                          episodeSelections[
+                                            season.seasonNumber
+                                          ]?.includes(episode.episodeNumber) ??
+                                          false
+                                        }
+                                        onChange={() =>
+                                          toggleEpisode(
+                                            season.seasonNumber,
+                                            episode.episodeNumber
+                                          )
+                                        }
+                                        className="h-4 w-4 rounded border-gray-600 bg-gray-800 text-indigo-500"
+                                      />
+                                      <span className="truncate">
+                                        {episode.episodeNumber}.{' '}
+                                        {episode.name ||
+                                          String.fromCharCode(160)}
+                                      </span>
+                                    </label>
+                                  )
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
                       );
                     })}
                 </tbody>

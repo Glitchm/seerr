@@ -572,6 +572,23 @@ requestRoutes.put<{ requestId: string }>(
               );
             }
 
+            // Episode-level selections cannot be turned into whole seasons
+            // without silently dropping or expanding the partial picks: reject
+            // edits that list a partial season (cancel and re-request instead).
+            const partialSeasonNumbers = request.seasons
+              .filter((season) => season.selectedEpisodes?.length)
+              .map((season) => season.seasonNumber);
+            if (
+              partialSeasonNumbers.length > 0 &&
+              requestedSeasons.some((sn) => partialSeasonNumbers.includes(sn))
+            ) {
+              return next({
+                status: 409,
+                message:
+                  'Seasons requested by episode cannot be requested in whole. Cancel the request to change it.',
+              });
+            }
+
             // Same key as create, so an edit cannot claim a season that a new
             // request is taking at the same moment
             return mediaLock.dispatch(
@@ -633,8 +650,16 @@ requestRoutes.put<{ requestId: string }>(
                     !currentSeasons.includes(sn) && !coveredSeasons.includes(sn)
                 );
 
+                // Partial (episode-level) rows persist across edits
+                const preservedPartialSeasons = request.seasons.filter(
+                  (rs) =>
+                    rs.selectedEpisodes?.length &&
+                    !keptSeasons.includes(rs.seasonNumber)
+                );
                 const resultingSeasonCount =
-                  keptSeasons.length + newSeasons.length;
+                  keptSeasons.length +
+                  newSeasons.length +
+                  preservedPartialSeasons.length;
 
                 if (resultingSeasonCount === 0) {
                   return next({
@@ -676,8 +701,10 @@ requestRoutes.put<{ requestId: string }>(
                   }
                 }
 
-                request.seasons = request.seasons.filter((rs) =>
-                  keptSeasons.includes(rs.seasonNumber)
+                request.seasons = request.seasons.filter(
+                  (rs) =>
+                    keptSeasons.includes(rs.seasonNumber) ||
+                    rs.selectedEpisodes?.length
                 );
 
                 if (newSeasons.length > 0) {
