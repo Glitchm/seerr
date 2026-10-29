@@ -21,6 +21,11 @@ class SeasonRequest {
   @Column({ type: 'int', default: MediaRequestStatus.PENDING })
   public status: MediaRequestStatus;
 
+  // Episode numbers picked within this season when the request covers
+  // individual episodes rather than the whole season (null = full season).
+  @Column({ type: 'simple-json', nullable: true })
+  public selectedEpisodes?: number[] | null;
+
   @ManyToOne(() => MediaRequest, (request) => request.seasons, {
     onDelete: 'CASCADE',
   })

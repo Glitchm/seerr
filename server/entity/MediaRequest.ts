@@ -10,6 +10,7 @@ import {
 } from '@server/constants/media';
 import { getRepository } from '@server/datasource';
 import type { MediaRequestBody } from '@server/interfaces/api/requestInterfaces';
+import { resolveEpisodeSelections } from '@server/lib/episodeSelections';
 import notificationManager, { Notification } from '@server/lib/notifications';
 import overrideRules from '@server/lib/overrideRules';
 import { Permission } from '@server/lib/permissions';
@@ -403,18 +404,16 @@ export class MediaRequest {
       const tmdbMediaShow = tmdbMedia as Awaited<
         ReturnType<typeof tmdb.getTvShow>
       >;
-      let requestedSeasons =
-        requestBody.seasons === 'all'
-          ? tmdbMediaShow.seasons
-              .filter(
-                (season) =>
-                  season.season_number !== 0 && season.episode_count > 0
-              )
-              .map((season) => season.season_number)
-          : (requestBody.seasons as number[]);
-      if (!settings.main.enableSpecialEpisodes) {
-        requestedSeasons = requestedSeasons.filter((sn) => sn > 0);
-      }
+      const episodeSelections = resolveEpisodeSelections(
+        requestBody.seasons,
+        requestBody.episodes,
+        tmdbMediaShow.seasons,
+        settings.main.enableSpecialEpisodes
+      );
+      const requestedSeasons = [
+        ...episodeSelections.fullSeasons,
+        ...episodeSelections.partialSeasons.map((p) => p.seasonNumber),
+      ];
 
       let existingSeasons: number[] = [];
 
@@ -457,13 +456,17 @@ export class MediaRequest {
       const finalSeasons = requestedSeasons.filter(
         (rs) => !existingSeasons.includes(rs)
       );
+      const finalPartialSeasons = episodeSelections.partialSeasons.filter(
+        (p) => !existingSeasons.includes(p.seasonNumber)
+      );
 
-      if (finalSeasons.length === 0) {
+      if (finalSeasons.length === 0 && finalPartialSeasons.length === 0) {
         throw new NoSeasonsAvailableError('No seasons available to request');
       } else if (
         !ignoreQuota &&
         quotas.tv.limit &&
-        finalSeasons.length > (quotas.tv.remaining ?? 0)
+        finalSeasons.length + finalPartialSeasons.length >
+          (quotas.tv.remaining ?? 0)
       ) {
         throw new QuotaRestrictedError('Series Quota exceeded.');
       }
@@ -509,26 +512,49 @@ export class MediaRequest {
         rootFolder: rootFolder,
         languageProfileId: requestBody.languageProfileId,
         tags: tags,
-        seasons: finalSeasons.map(
-          (sn) =>
-            new SeasonRequest({
-              seasonNumber: sn,
-              status: user.hasPermission(
-                [
-                  requestBody.is4k
-                    ? Permission.AUTO_APPROVE_4K
-                    : Permission.AUTO_APPROVE,
-                  requestBody.is4k
-                    ? Permission.AUTO_APPROVE_4K_TV
-                    : Permission.AUTO_APPROVE_TV,
-                  Permission.MANAGE_REQUESTS,
-                ],
-                { type: 'or' }
-              )
-                ? MediaRequestStatus.APPROVED
-                : MediaRequestStatus.PENDING,
-            })
-        ),
+        seasons: [
+          ...finalSeasons.map(
+            (sn) =>
+              new SeasonRequest({
+                seasonNumber: sn,
+                status: user.hasPermission(
+                  [
+                    requestBody.is4k
+                      ? Permission.AUTO_APPROVE_4K
+                      : Permission.AUTO_APPROVE,
+                    requestBody.is4k
+                      ? Permission.AUTO_APPROVE_4K_TV
+                      : Permission.AUTO_APPROVE_TV,
+                    Permission.MANAGE_REQUESTS,
+                  ],
+                  { type: 'or' }
+                )
+                  ? MediaRequestStatus.APPROVED
+                  : MediaRequestStatus.PENDING,
+              })
+          ),
+          ...finalPartialSeasons.map(
+            (p) =>
+              new SeasonRequest({
+                seasonNumber: p.seasonNumber,
+                selectedEpisodes: p.episodeNumbers,
+                status: user.hasPermission(
+                  [
+                    requestBody.is4k
+                      ? Permission.AUTO_APPROVE_4K
+                      : Permission.AUTO_APPROVE,
+                    requestBody.is4k
+                      ? Permission.AUTO_APPROVE_4K_TV
+                      : Permission.AUTO_APPROVE_TV,
+                    Permission.MANAGE_REQUESTS,
+                  ],
+                  { type: 'or' }
+                )
+                  ? MediaRequestStatus.APPROVED
+                  : MediaRequestStatus.PENDING,
+              })
+          ),
+        ],
         isAutoRequest: options.isAutoRequest ?? false,
         ignoreQuota,
       });

@@ -13,11 +13,18 @@ export interface RequestResultsResponse extends PaginatedResponse {
   };
 }
 
+export interface EpisodeRequestPayload {
+  seasonNumber: number;
+  episodeNumbers: number[];
+}
+
 export type MediaRequestBody = {
   mediaType: MediaType;
   mediaId: number;
   tvdbId?: number;
   seasons?: number[] | 'all';
+  /** Episode-level selection for seasons NOT fully requested. */
+  episodes?: EpisodeRequestPayload[];
   is4k?: boolean;
   serverId?: number;
   profileId?: number;

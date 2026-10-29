@@ -94,7 +94,10 @@ export interface AddSeriesOptions {
   title: string;
   profileId: number;
   languageProfileId?: number;
+  /** Seasons requested in full; each is monitored. */
   seasons: number[];
+  /** Seasons requested by individual episodes; kept unmonitored apart from the picks. */
+  episodeSelections?: { seasonNumber: number; episodeNumbers: number[] }[];
   seasonFolder: boolean;
   rootFolderPath: string;
   tags?: number[];
@@ -263,7 +266,11 @@ class SonarrAPI extends ServarrBase<{
             });
           }
 
-          if (options.searchNow) {
+          await this.applyEpisodeSelections(newSeriesResponse.data.id, options);
+
+          // A series search must not run when only episode selections were
+          // requested: it could search unmonitored episodes of other seasons.
+          if (options.searchNow && options.seasons.length > 0) {
             this.searchSeries(newSeriesResponse.data.id);
           }
 
@@ -318,6 +325,8 @@ class SonarrAPI extends ServarrBase<{
         });
         throw new Error('Failed to add series to Sonarr');
       }
+
+      await this.applyEpisodeSelections(createdSeriesResponse.data.id, options);
 
       return createdSeriesResponse.data;
     } catch (e) {
@@ -386,6 +395,59 @@ class SonarrAPI extends ServarrBase<{
         seriesId,
       });
       throw new Error('Failed to get episodes', { cause: e });
+    }
+  }
+
+  /**
+   * Monitors (and optionally searches) the selected episodes of an
+   * episode-level request. Targeted so unmonitored episodes of the same
+   * series are never searched.
+   */
+  private async applyEpisodeSelections(
+    seriesId: number,
+    options: AddSeriesOptions
+  ): Promise<void> {
+    if (!options.episodeSelections?.length) {
+      return;
+    }
+
+    const episodes = await this.getEpisodes(seriesId);
+    const selectionEpisodeIds = episodes
+      .filter((ep) =>
+        options.episodeSelections?.some(
+          (selection) =>
+            selection.seasonNumber === ep.seasonNumber &&
+            selection.episodeNumbers.includes(ep.episodeNumber)
+        )
+      )
+      .map((ep) => ep.id);
+
+    if (selectionEpisodeIds.length === 0) {
+      logger.warn('No Sonarr episodes matched the episode selection.', {
+        label: 'Sonarr',
+        seriesId,
+        selections: options.episodeSelections,
+      });
+      return;
+    }
+
+    const unmonitoredIds = episodes
+      .filter((ep) => !ep.monitored && selectionEpisodeIds.includes(ep.id))
+      .map((ep) => ep.id);
+
+    if (unmonitoredIds.length > 0) {
+      logger.info('Monitoring selected episodes for episode-level request.', {
+        label: 'Sonarr',
+        seriesId,
+        episodeCount: unmonitoredIds.length,
+      });
+      await this.monitorEpisodes(unmonitoredIds);
+    }
+
+    if (options.searchNow && selectionEpisodeIds.length > 0) {
+      await this.runCommand('EpisodeSearch', {
+        episodeIds: selectionEpisodeIds,
+      });
     }
   }
 

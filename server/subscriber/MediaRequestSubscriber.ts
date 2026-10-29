@@ -716,7 +716,15 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           rootFolderPath: rootFolder,
           title: series.name,
           tvdbid: tvdbId,
-          seasons: entity.seasons.map((season) => season.seasonNumber),
+          seasons: entity.seasons
+            .filter((season) => !season.selectedEpisodes?.length)
+            .map((season) => season.seasonNumber),
+          episodeSelections: entity.seasons
+            .filter((season) => season.selectedEpisodes?.length)
+            .map((season) => ({
+              seasonNumber: season.seasonNumber,
+              episodeNumbers: season.selectedEpisodes as number[],
+            })),
           seasonFolder: sonarrSettings.enableSeasonFolders,
           seriesType,
           tags,

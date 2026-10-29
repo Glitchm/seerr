@@ -22,6 +22,7 @@ import type {
   MediaRequestBody,
   RequestResultsResponse,
 } from '@server/interfaces/api/requestInterfaces';
+import { InvalidEpisodeSelectionError } from '@server/lib/episodeSelections';
 import { Permission } from '@server/lib/permissions';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
@@ -338,6 +339,8 @@ requestRoutes.post<never, MediaRequest, MediaRequestBody>(
           return next({ status: 409, message: error.message });
         case NoSeasonsAvailableError:
           return next({ status: 202, message: error.message });
+        case InvalidEpisodeSelectionError:
+          return next({ status: 400, message: error.message });
         case BlocklistedMediaError:
           return next({ status: 403, message: error.message });
         default:
