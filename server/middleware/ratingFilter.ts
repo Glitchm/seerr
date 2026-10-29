@@ -39,11 +39,29 @@ export const ratingCapResultFilter = (
         originalJson({ ...(body as object), results: filtered });
       })
       .catch((e) => {
-        logger.debug('Rating cap result filter failed; returning unfiltered', {
-          label: 'Ratings',
-          errorMessage: e.message,
-        });
-        originalJson(body);
+        // Fail CLOSED for capped (e.g. child) users: a broken filter must never
+        // leak over-cap titles onto a capped user's page. Uncapped users skip
+        // filtering entirely, so returning the original body is safe for them.
+        const capped = !!req.user?.maxMovieRating || !!req.user?.maxTvRating;
+        if (capped) {
+          logger.warn(
+            'Rating cap result filter failed; failing closed for capped user',
+            {
+              label: 'Ratings',
+              errorMessage: e.message,
+            }
+          );
+          originalJson({ ...(body as object), results: [] });
+        } else {
+          logger.debug(
+            'Rating cap result filter failed; returning unfiltered',
+            {
+              label: 'Ratings',
+              errorMessage: e.message,
+            }
+          );
+          originalJson(body);
+        }
       });
 
     return res;
