@@ -14,6 +14,18 @@ export interface BaseSearchResult<T> {
   results: T[];
 }
 
+// Hard cap on pages drained for sorting (50 x 20 = 1000 titles). TMDB
+// relevance pagination degrades long before page 50, and an unbounded drain
+// turns a common query into a request flood against TMDB.
+export const MAX_DRAIN_PAGES = 50;
+
+const DRAIN_PAGE_DELAY_MS = 250;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
 interface BaseMedia {
   id: number;
   mediaType: string;
@@ -27,10 +39,12 @@ interface DiscoverResult<T, S> {
   isLoadingInitialData: boolean;
   isLoadingMore: boolean;
   fetchMore: () => void;
+  loadAll: () => Promise<void>;
   isEmpty: boolean;
   isReachingEnd: boolean;
   error: unknown;
   titles: T[];
+  size: number;
   firstResultData?: BaseSearchResult<T> & S;
   mutate?: () => void;
 }
@@ -109,6 +123,25 @@ const useDiscover = <
     setSize(size + 1);
   };
 
+  /**
+   * Drains the remaining result pages sequentially (paced so upstream TMDB is
+   * not flooded) so a sort over the returned `titles` covers the full result set.
+   */
+  const loadAll = async (): Promise<void> => {
+    const target = Math.min(data?.[0]?.totalPages ?? 0, MAX_DRAIN_PAGES);
+
+    if (target === 0) {
+      return;
+    }
+
+    for (let page = size; page < target; page++) {
+      // Functional update keeps the page count monotonic if a scroll fetch
+      // raced ahead mid-drain.
+      await setSize((current) => Math.max(current, page + 1));
+      await sleep(DRAIN_PAGE_DELAY_MS);
+    }
+  };
+
   let titles = (data ?? []).reduce((a, v) => {
     const results: T[] = [];
 
@@ -157,7 +190,9 @@ const useDiscover = <
   const isReachingEnd =
     isEmpty ||
     (!!data && (data[data?.length - 1]?.results.length ?? 0) < 20) ||
-    (!!data && (data[data?.length - 1]?.totalResults ?? 0) <= size * 20) ||
+    (!!data &&
+      (data[data?.length - 1]?.totalResults ?? 0) <=
+        (data?.length ?? 0) * 20) ||
     (!!data && (data[data?.length - 1]?.totalResults ?? 0) < 41);
 
   useEffect(() => {
@@ -174,10 +209,12 @@ const useDiscover = <
     isLoadingInitialData,
     isLoadingMore,
     fetchMore,
+    loadAll,
     isEmpty,
     isReachingEnd,
     error: error && titles.length ? null : error,
     titles,
+    size,
     firstResultData: data?.[0],
     mutate,
   };
